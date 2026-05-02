@@ -1,22 +1,21 @@
-name: AAPS CI (Full Integrated Version)
+name: AAPS CI (Smart Version Adapter)
 
 on:
   workflow_dispatch:
     inputs:
       tagName:
-        description: 'Select AAPS Version'
+        description: '选择 AAPS 版本 (3.4+ 使用 JDK21, 其余使用 JDK17)'
         required: true
         default: '3.4.2.2'
         type: choice
         options:
           - 3.4.2.2
           - 3.4.2.1
-          - 3.4.2.0
           - 3.2.0.4
           - 3.1.0.3
           - 3.0.0.2
       buildVariant:
-        description: 'Select Build Variant'
+        description: '选择编译变体'
         required: true
         default: 'fullRelease'
         type: choice
@@ -53,24 +52,26 @@ jobs:
           find . -type f \( -name "*.kt" -o -name "*.java" \) | xargs sed -i 's/System.currentTimeMillis() > END_OF_LIFE/false/g' || true
           find . -type f \( -name "*.kt" -o -name "*.java" \) | xargs sed -i 's/System.currentTimeMillis() > expirationDate/false/g' || true
           
-          # 3. 自动删除导致编译失败的俄语文件 (预防性)
+          # 3. 自动删除导致编译失败的俄语文件
           RU_FILE="core/ui/src/main/res/values-ru/strings.xml"
           if [ -f "$RU_FILE" ]; then
             rm "$RU_FILE"
             echo "🗑️ Removed Russian strings file."
           fi
 
-          # 4. 关键：执行本地提交以绕过 Gradle 的 "uncommitted changes" 检查
+          # 4. 执行本地提交以绕过 Gradle 的 "uncommitted changes" 检查
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
           git add .
           git commit -m "Apply custom bypass patches" || true
-          echo "✅ Local commit created to satisfy build check."
+          echo "✅ Local commit created."
 
-      - name: Set up JDK 21
+      - name: Set up JDK (Auto-Adapter)
         uses: actions/setup-java@v4
         with:
-          java-version: 21
+          # 动态判断：3.4.x 以上版本用 JDK 21，旧版本用 JDK 17
+          java-version: |
+            ${{ startsWith(github.event.inputs.tagName, '3.4') && '21' || '17' }}
           distribution: 'temurin'
           cache: gradle
 
@@ -84,10 +85,10 @@ jobs:
       - name: Build APKs
         run: |
           chmod +x gradlew
-          # 使用 --no-daemon 提高云端环境稳定性，并注入签名参数
+          # 使用 4g 内存以获得更好的旧版兼容性
           ./gradlew :app:assemble${{ github.event.inputs.buildVariant }} :wear:assemble${{ github.event.inputs.buildVariant }} \
             --no-daemon \
-            -Dorg.gradle.jvmargs="-Xmx8g" \
+            -Dorg.gradle.jvmargs="-Xmx4g" \
             -Pandroid.injected.signing.store.file=$(pwd)/release.jks \
             -Pandroid.injected.signing.store.password="android" \
             -Pandroid.injected.signing.key.alias="key0" \
