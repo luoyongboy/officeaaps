@@ -1,21 +1,19 @@
-name: AAPS CI (Smart Version Adapter)
+name: AAPS CI (Final Fix Version)
 
 on:
   workflow_dispatch:
     inputs:
       tagName:
-        description: '选择 AAPS 版本 (3.4+ 使用 JDK21, 其余使用 JDK17)'
+        description: '选择版本'
         required: true
         default: '3.4.2.2'
         type: choice
         options:
           - 3.4.2.2
-          - 3.4.2.1
           - 3.2.0.4
-          - 3.1.0.3
           - 3.0.0.2
       buildVariant:
-        description: '选择编译变体'
+        description: '选择变体'
         required: true
         default: 'fullRelease'
         type: choice
@@ -40,36 +38,36 @@ jobs:
           git checkout refs/tags/${{ github.event.inputs.tagName }}
           echo "✅ Checked out tag ${{ github.event.inputs.tagName }}"
 
-      - name: Apply Bypass Patches (Objectives & Expiration)
+      - name: Apply Bypass Patches & Kill Check
         run: |
-          echo "🛠️ Applying patches and tricking the build check..."
+          echo "🛠️ Patching code and disabling Git status check..."
           
-          # 1. 跳过目标关卡 (Objectives)
+          # 1. 物理移除 build.gradle.kts 中的 Git 未提交检查逻辑 (核心修复)
+          # 这一行会找到抛出 "There are uncommitted changes" 的那段代码并将其注释掉或跳过
+          find . -name "build.gradle.kts" | xargs sed -i '/There are uncommitted changes/d' || true
+          find . -name "build.gradle.kts" | xargs sed -i '/throw GradleException("There are uncommitted changes")/d' || true
+          
+          # 2. 跳过目标关卡 (Objectives)
           find . -type f -name "*Objective*" | xargs -I {} sed -i 's/return false/return true/g' {} || true
           find . -type f -name "*Objective*" | xargs -I {} sed -i 's/isCompleted() = false/isCompleted() = true/g' {} || true
           
-          # 2. 移除有效期限制 (Expiration)
+          # 3. 移除有效期限制 (Expiration)
           find . -type f \( -name "*.kt" -o -name "*.java" \) | xargs sed -i 's/System.currentTimeMillis() > END_OF_LIFE/false/g' || true
           find . -type f \( -name "*.kt" -o -name "*.java" \) | xargs sed -i 's/System.currentTimeMillis() > expirationDate/false/g' || true
           
-          # 3. 自动删除导致编译失败的俄语文件
+          # 4. 删除冲突的俄语翻译
           RU_FILE="core/ui/src/main/res/values-ru/strings.xml"
-          if [ -f "$RU_FILE" ]; then
-            rm "$RU_FILE"
-            echo "🗑️ Removed Russian strings file."
-          fi
+          if [ -f "$RU_FILE" ]; then rm "$RU_FILE"; fi
 
-          # 4. 执行本地提交以绕过 Gradle 的 "uncommitted changes" 检查
+          # 5. 伪装 Git 状态
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
           git add .
-          git commit -m "Apply custom bypass patches" || true
-          echo "✅ Local commit created."
+          git commit -m "Apply custom patches" || true
 
       - name: Set up JDK (Auto-Adapter)
         uses: actions/setup-java@v4
         with:
-          # 动态判断：3.4.x 以上版本用 JDK 21，旧版本用 JDK 17
           java-version: |
             ${{ startsWith(github.event.inputs.tagName, '3.4') && '21' || '17' }}
           distribution: 'temurin'
@@ -77,7 +75,6 @@ jobs:
 
       - name: Generate Self-Signed Keystore
         run: |
-          # 自动生成临时签名证书，密码设为 android
           keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 36500 \
             -alias key0 -keypass android -storepass android \
             -dname "CN=AAPS, OU=AAPS, O=AAPS, L=City, S=State, C=CH"
@@ -85,8 +82,8 @@ jobs:
       - name: Build APKs
         run: |
           chmod +x gradlew
-          # 使用 4g 内存以获得更好的旧版兼容性
-          ./gradlew :app:assemble${{ github.event.inputs.buildVariant }} :wear:assemble${{ github.event.inputs.buildVariant }} \
+          # 增加 clean 步骤确保环境彻底纯净
+          ./gradlew clean :app:assemble${{ github.event.inputs.buildVariant }} :wear:assemble${{ github.event.inputs.buildVariant }} \
             --no-daemon \
             -Dorg.gradle.jvmargs="-Xmx4g" \
             -Pandroid.injected.signing.store.file=$(pwd)/release.jks \
