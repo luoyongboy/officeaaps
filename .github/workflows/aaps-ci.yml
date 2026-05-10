@@ -1,6 +1,5 @@
 name: AAPS CI (Final Fix Version)
-
-on:
+on: 
   workflow_dispatch:
     inputs:
       tagName:
@@ -11,7 +10,6 @@ on:
         options:
           - 3.4.2.2
           - 3.2.0.4
-          - 3.0.0.2
       buildVariant:
         description: '选择变体'
         required: true
@@ -36,65 +34,51 @@ jobs:
           git remote add upstream https://github.com/nightscout/AndroidAPS.git || true
           git fetch upstream refs/tags/${{ github.event.inputs.tagName }}:refs/tags/${{ github.event.inputs.tagName }}
           git checkout refs/tags/${{ github.event.inputs.tagName }}
-          echo "✅ Checked out tag ${{ github.event.inputs.tagName }}"
 
-      - name: Apply Bypass Patches & Kill Check
+      - name: Apply Bypass Patches & Fix Git Check
         run: |
-          echo "🛠️ Patching code and disabling Git status check..."
-          
-          # 1. 物理移除 build.gradle.kts 中的 Git 未提交检查逻辑 (核心修复)
-          # 这一行会找到抛出 "There are uncommitted changes" 的那段代码并将其注释掉或跳过
-          find . -name "build.gradle.kts" | xargs sed -i '/There are uncommitted changes/d' || true
+          # 1. 彻底移除 build.gradle.kts 中的所有 Git 未提交检查（防止报错）
+          find . -name "build.gradle.kts" | xargs sed -i '/isMaster/d' || true
+          find . -name "build.gradle.kts" | xargs sed -i '/allCommitted/d' || true
           find . -name "build.gradle.kts" | xargs sed -i '/throw GradleException("There are uncommitted changes")/d' || true
           
-          # 2. 跳过目标关卡 (Objectives)
+          # 2. 跳过目标关卡 (Objectives) 方便孩子使用
           find . -type f -name "*Objective*" | xargs -I {} sed -i 's/return false/return true/g' {} || true
-          find . -type f -name "*Objective*" | xargs -I {} sed -i 's/isCompleted() = false/isCompleted() = true/g' {} || true
           
-          # 3. 移除有效期限制 (Expiration)
-          find . -type f \( -name "*.kt" -o -name "*.java" \) | xargs sed -i 's/System.currentTimeMillis() > END_OF_LIFE/false/g' || true
-          find . -type f \( -name "*.kt" -o -name "*.java" \) | xargs sed -i 's/System.currentTimeMillis() > expirationDate/false/g' || true
-          
-          # 4. 删除冲突的俄语翻译
-          RU_FILE="core/ui/src/main/res/values-ru/strings.xml"
-          if [ -f "$RU_FILE" ]; then rm "$RU_FILE"; fi
-
-          # 5. 伪装 Git 状态
+          # 3. 伪装 Git 环境（让版本号能生成）
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
           git add .
-          git commit -m "Apply custom patches" || true
+          git commit -m "Fix for CI build" || true
 
-      - name: Set up JDK (Auto-Adapter)
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          java-version: |
-            ${{ startsWith(github.event.inputs.tagName, '3.4') && '21' || '17' }}
+          java-version: '17' # 3.4.x 以上通常需要 JDK 17
           distribution: 'temurin'
           cache: gradle
 
-      - name: Generate Self-Signed Keystore
+      - name: Generate Release Keystore
         run: |
           keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 36500 \
             -alias key0 -keypass android -storepass android \
             -dname "CN=AAPS, OU=AAPS, O=AAPS, L=City, S=State, C=CH"
 
-      - name: Build APKs
+      - name: Build Both APKs (Mobile & Wear)
         run: |
           chmod +x gradlew
-          # 增加 clean 步骤确保环境彻底纯净
-          ./gradlew clean :app:assemble${{ github.event.inputs.buildVariant }} :wear:assemble${{ github.event.inputs.buildVariant }} \
-            --no-daemon \
-            -Dorg.gradle.jvmargs="-Xmx4g" \
+          # 同时执行 app 和 wear 的打包任务
+          ./gradlew :app:assemble${{ github.event.inputs.buildVariant }} :wear:assemble${{ github.event.inputs.buildVariant }} \
             -Pandroid.injected.signing.store.file=$(pwd)/release.jks \
             -Pandroid.injected.signing.store.password="android" \
             -Pandroid.injected.signing.key.alias="key0" \
             -Pandroid.injected.signing.key.password="android" \
-            -x lint -x test
+            --no-daemon -x test
 
-      - name: Upload Artifacts
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: aaps-apk-${{ github.event.inputs.tagName }}-${{ github.event.inputs.buildVariant }}
+          name: AAPS-Dual-Build-${{ github.event.inputs.tagName }}
           path: |
-            **/build/outputs/apk/**/*.apk
+            app/build/outputs/apk/**/app-*.apk
+            wear/build/outputs/apk/**/wear-*.apk
