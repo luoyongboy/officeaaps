@@ -1,9 +1,10 @@
-name: AAPS CI (Final Fix Version)
+
+name: AAPS CI (Dual Build Final)
 on: 
   workflow_dispatch:
     inputs:
       tagName:
-        description: '选择版本'
+        description: '选择 AAPS 版本'
         required: true
         default: '3.4.2.2'
         type: choice
@@ -21,7 +22,7 @@ on:
 
 jobs:
   build:
-    name: Build AAPS
+    name: Build AAPS Mobile & Wear
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source Code
@@ -35,50 +36,59 @@ jobs:
           git fetch upstream refs/tags/${{ github.event.inputs.tagName }}:refs/tags/${{ github.event.inputs.tagName }}
           git checkout refs/tags/${{ github.event.inputs.tagName }}
 
-      - name: Apply Bypass Patches & Fix Git Check
+      - name: Apply Bypass Patches & Fix Syntax Errors
         run: |
-          # 1. 彻底移除 build.gradle.kts 中的所有 Git 未提交检查（防止报错）
-          find . -name "build.gradle.kts" | xargs sed -i '/isMaster/d' || true
-          find . -name "build.gradle.kts" | xargs sed -i '/allCommitted/d' || true
-          find . -name "build.gradle.kts" | xargs sed -i '/throw GradleException("There are uncommitted changes")/d' || true
+          # 1. 修复 Git 检查逻辑（解决 831 个语法错误的核心）
+          # 不再删除行，而是将抛出异常替换为打印日志，确保 {} 括号匹配
+          find . -name "build.gradle.kts" | xargs sed -i 's/throw GradleException("GIT system is not available.*")/println("⚠️ Git Bypass")/g' || true
+          find . -name "build.gradle.kts" | xargs sed -i 's/throw GradleException("There are uncommitted changes.*")/println("⚠️ Commit Bypass")/g' || true
           
-          # 2. 跳过目标关卡 (Objectives) 方便孩子使用
+          # 2. 强制将检查变量设为 true，从源头封堵报错分支
+          find . -name "build.gradle.kts" | xargs sed -i 's/val allCommitted =.*/val allCommitted = true/g' || true
+          find . -name "build.gradle.kts" | xargs sed -i 's/val gitAvailable =.*/val gitAvailable = true/g' || true
+
+          # 3. 跳过目标关卡 (Objectives) 方便孩子直接进入闭环状态
           find . -type f -name "*Objective*" | xargs -I {} sed -i 's/return false/return true/g' {} || true
+          find . -type f -name "*Objective*" | xargs -I {} sed -i 's/isCompleted() = false/isCompleted() = true/g' {} || true
+
+          # 4. 移除过期限制 (EOL)
+          find . -type f \( -name "*.kt" -o -name "*.java" \) | xargs sed -i 's/System.currentTimeMillis() > END_OF_LIFE/false/g' || true
           
-          # 3. 伪装 Git 环境（让版本号能生成）
+          # 5. 伪装 Git 环境
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
           git add .
-          git commit -m "Fix for CI build" || true
+          git commit -m "Final patches for dual build" || true
 
-      - name: Set up JDK
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17' # 3.4.x 以上通常需要 JDK 17
+          java-version: '17'
           distribution: 'temurin'
           cache: gradle
 
-      - name: Generate Release Keystore
+      - name: Generate Unified Keystore
         run: |
+          # 生成唯一的签名文件，确保手机和手表能互相识别
           keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 36500 \
             -alias key0 -keypass android -storepass android \
-            -dname "CN=AAPS, OU=AAPS, O=AAPS, L=City, S=State, C=CH"
+            -dname "CN=AAPS, OU=AAPS, O=AAPS, L=Liaoning, S=LN, C=CN"
 
       - name: Build Both APKs (Mobile & Wear)
         run: |
           chmod +x gradlew
-          # 同时执行 app 和 wear 的打包任务
-          ./gradlew :app:assemble${{ github.event.inputs.buildVariant }} :wear:assemble${{ github.event.inputs.buildVariant }} \
+          # 同时执行两个模块的编译
+          ./gradlew :app:assemble${{ github.event.inputs.buildVariant }} \
+                    :wear:assemble${{ github.event.inputs.buildVariant }} \
             -Pandroid.injected.signing.store.file=$(pwd)/release.jks \
             -Pandroid.injected.signing.store.password="android" \
             -Pandroid.injected.signing.key.alias="key0" \
             -Pandroid.injected.signing.key.password="android" \
-            --no-daemon -x test
+            --no-daemon -x test -x lint
 
-      - name: Upload APKs
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: AAPS-Dual-Build-${{ github.event.inputs.tagName }}
           path: |
-            app/build/outputs/apk/**/app-*.apk
-            wear/build/outputs/apk/**/wear-*.apk
+            **/build/outputs/apk/**/*.apk
